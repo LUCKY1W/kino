@@ -29,8 +29,12 @@ def convert_datetime(s):
 sqlite3.register_adapter(datetime, adapt_datetime)
 sqlite3.register_converter('TIMESTAMP', convert_datetime)
 
-# Database connection with type detection
+# Global variables for database connection and cursor
+conn = None
+c = None
+
 try:
+    os.makedirs("db", exist_ok=True)
     conn = sqlite3.connect("db/bot_data.db", check_same_thread=False, detect_types=sqlite3.PARSE_DECLTYPES)
     c = conn.cursor()
 
@@ -55,9 +59,13 @@ try:
     conn.commit()
 except sqlite3.Error as e:
     print(f"Database error: {e}")
+    if conn is None:
+        conn = sqlite3.connect(":memory:", check_same_thread=False, detect_types=sqlite3.PARSE_DECLTYPES)
+        c = conn.cursor()
+        print("Warning: Using in-memory database due to connection failure.")
 
 # === STATES ===
-CHOOSING_TYPE, AWAITING_VIDEO, AWAITING_TRAILER, AWAITING_CODE = range(4)
+CHOOSING_TYPE, AWAITING_VIDEO, AWAITING_TRAILER, AWAITING_CODE, AWAITING_ADMIN, AWAITING_BROADCAST = range(6)
 
 # === CONTEXT KEYS ===
 UPLOAD_CONTEXT = {}
@@ -128,13 +136,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("👋 Xush kelibsiz! Bu yerda filmlar kod orqali qidiriladi.")
 
-async def statistika_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in SUPER_ADMINS:
-        await update.message.reply_text("❌ Sizda ruxsat yo'q.")
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()  # Tugma bosilganligini tasdiqlaydi
+    user_id = query.from_user.id
+
+    if user_id not in SUPER_ADMINS:
+        await query.message.reply_text("❌ Sizda ruxsat yo'q.")
         return
 
-    users, uploads = get_stats()
-    text = f"""📊 <b>Statistika</b>
+    if query.data == "stat":
+        users, uploads = get_stats()
+        text = f"""📊 <b>Statistika</b>
 
 👥 <b>Foydalanuvchilar:</b>
 ├ Jami: <code>{users['total']}</code>
@@ -150,22 +163,27 @@ async def statistika_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 ├ Haftalik: <code>{uploads['week']}</code>
 └ Kundalik: <code>{uploads['day']}</code>
 """
-    await update.message.reply_text(text, parse_mode="HTML")
-
-async def upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in SUPER_ADMINS:
-        await update.message.reply_text("❌ Siz admin emassiz.")
-        return ConversationHandler.END
-
-    keyboard = [[InlineKeyboardButton("🎬 Kino", callback_data="upload_movie"),
-                 InlineKeyboardButton("📺 Serial", callback_data="upload_serial")]]
-    await update.message.reply_text("Nima yuklaysiz?", reply_markup=InlineKeyboardMarkup(keyboard))
-    return CHOOSING_TYPE
+        await query.message.reply_text(text, parse_mode="HTML")
+    elif query.data == "add_admin":
+        await query.message.reply_text("➕ Yangi admin qo'shish uchun foydalanuvchi ID'sini yuboring:")
+        return AWAITING_ADMIN
+    elif query.data == "broadcast":
+        await query.message.reply_text("📢 Barcha foydalanuvchilarga yuboriladigan xabarni yuboring:")
+        return AWAITING_BROADCAST
+    elif query.data == "upload_start":
+        keyboard = [[InlineKeyboardButton("🎬 Kino", callback_data="upload_movie"),
+                     InlineKeyboardButton("📺 Serial", callback_data="upload_serial")]]
+        await query.message.reply_text("Nima yuklaysiz?", reply_markup=InlineKeyboardMarkup(keyboard))
+        return CHOOSING_TYPE
 
 async def choose_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
+
+    if user_id not in SUPER_ADMINS:
+        await query.message.reply_text("❌ Siz admin emassiz.")
+        return ConversationHandler.END
 
     UPLOAD_CONTEXT[user_id] = {"type": "serial" if query.data == "upload_serial" else "movie"}
     await query.message.reply_text("🎥 Videoni yuboring")
@@ -224,6 +242,42 @@ async def receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Xato yuz berdi: {str(e)}")
         return ConversationHandler.END
 
+async def receive_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in SUPER_ADMINS:
+        await update.message.reply_text("❌ Sizda ruxsat yo'q.")
+        return ConversationHandler.END
+
+    try:
+        new_admin_id = int(update.message.text.strip())
+        if new_admin_id not in SUPER_ADMINS:
+            SUPER_ADMINS.append(new_admin_id)
+            await update.message.reply_text(f"✅ Foydalanuvchi {new_admin_id} admin sifatida qo'shildi!")
+        else:
+            await update.message.reply_text("❗ Bu foydalanuvchi allaqachon admin.")
+        return ConversationHandler.END
+    except ValueError:
+        await update.message.reply_text("❌ Iltimos, to'g'ri foydalanuvchi ID'sini kiriting (faqat raqamlar).")
+        return AWAITING_ADMIN
+
+async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in SUPER_ADMINS:
+        await update.message.reply_text("❌ Sizda ruxsat yo'q.")
+        return ConversationHandler.END
+
+    message = update.message.text
+    try:
+        c.execute("SELECT user_id FROM users")
+        users = c.fetchall()
+        for user in users:
+            await context.bot.send_message(chat_id=user[0], text=message)
+        await update.message.reply_text(f"✅ Xabar {len(users)} foydalanuvchiga yuborildi!")
+        return ConversationHandler.END
+    except Exception as e:
+        await update.message.reply_text(f"❌ Xato yuz berdi: {str(e)}")
+        return ConversationHandler.END
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     UPLOAD_CONTEXT.pop(user_id, None)
@@ -234,19 +288,23 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 conv_handler = ConversationHandler(
-    entry_points=[CommandHandler("upload", upload_start)],
+    entry_points=[
+        CommandHandler("upload", lambda update, context: button_handler(update, context)),
+        CallbackQueryHandler(button_handler, pattern="^(upload_start|stat|add_admin|broadcast)$")
+    ],
     states={
-        CHOOSING_TYPE: [CallbackQueryHandler(choose_type)],
+        CHOOSING_TYPE: [CallbackQueryHandler(choose_type, pattern="^(upload_movie|upload_serial)$")],
         AWAITING_VIDEO: [MessageHandler(filters.VIDEO, receive_video)],
         AWAITING_TRAILER: [MessageHandler(filters.PHOTO, receive_trailer)],
         AWAITING_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_code)],
+        AWAITING_ADMIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_admin_id)],
+        AWAITING_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_broadcast)],
     },
     fallbacks=[CommandHandler("cancel", cancel)],
     per_message=True
 )
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("stat", statistika_handler))
 app.add_handler(conv_handler)
 
 if __name__ == "__main__":
@@ -255,4 +313,5 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Bot error: {e}")
     finally:
-        conn.close()
+        if conn:
+            conn.close()
