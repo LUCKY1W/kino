@@ -10,7 +10,7 @@ from telegram.ext import (
 
 # === ENV ===
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = ("7375606355:AAFLqkiZ_MBAtWzSfAhhXIVOgPTFPNM2w94")
 
 # === CONFIGURATION ===
 SUPER_ADMINS = [1693559876]  # https://t.me/Ibodov_Umidjon
